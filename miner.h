@@ -36,6 +36,10 @@ void *alloca (size_t);
 # endif
 #endif
 
+#ifdef HAVE_CELL_SPU
+#include <libspe2.h>
+extern spe_program_handle_t scrypt_spu;
+#endif
 
 #if ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3))
 #define WANT_BUILTIN_BSWAP
@@ -92,6 +96,9 @@ enum {
 struct thr_info {
 	int		id;
 	pthread_t	pth;
+#ifdef HAVE_CELL_SPU
+	spe_context_ptr_t spe_context;
+#endif
 	struct thread_q	*q;
 };
 
@@ -140,13 +147,11 @@ extern bool fulltest(const unsigned char *hash, const unsigned char *target);
 extern int opt_timeout;
 extern bool want_longpoll;
 extern bool have_longpoll;
-extern char *opt_proxy;
-extern long opt_proxy_type;
 struct thread_q;
 
 struct work_restart {
-	volatile unsigned long	restart;
-	char			padding[128 - sizeof(unsigned long)];
+	volatile unsigned int	restart;
+	char			padding[128 - sizeof(unsigned int)];
 };
 
 extern pthread_mutex_t time_lock;

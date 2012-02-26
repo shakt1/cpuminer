@@ -31,6 +31,12 @@
 #include "compat.h"
 #include "miner.h"
 
+#ifdef HAVE_CELL_SPU
+#include "scrypt-cell-spu.h"
+#endif
+
+
+
 #define PROGRAM_NAME		"minerd"
 #define DEF_RPC_URL		"http://127.0.0.1:9332/"
 #define LP_SCANTIME		60
@@ -105,11 +111,10 @@ static const bool opt_time = true;
 static enum sha256_algos opt_algo = ALGO_SCRYPT;
 static int opt_n_threads;
 static int num_processors;
+static int num_cell_spu; /* the number of SPU cores for Cell/BE (normally 6) */
 static char *rpc_url;
 static char *rpc_userpass;
 static char *rpc_user, *rpc_pass;
-char *opt_proxy;
-long opt_proxy_type;
 struct thr_info *thr_info;
 static int work_thr_id;
 int longpoll_thr_id;
@@ -128,7 +133,6 @@ Options:\n\
   -O, --userpass=U:P    username:password pair for mining server\n\
   -u, --user=USERNAME   username for mining server\n\
   -p, --pass=PASSWORD   password for mining server\n\
-  -x, --proxy=[PROTOCOL://]HOST[:PORT]  connect through a proxy\n\
   -t, --threads=N       number of miner threads (default: number of processors)\n\
   -r, --retries=N       number of times to retry if a network call fails\n\
                           (default: retry indefinitely)\n\
@@ -150,7 +154,7 @@ Options:\n\
   -h, --help            display this help text and exit\n\
 ";
 
-static char const short_options[] = "a:c:Dhp:Px:qr:R:s:t:T:o:u:O:V";
+static char const short_options[] = "a:c:Dhp:Pqr:R:s:t:T:o:u:O:V";
 
 static struct option const options[] = {
 	{ "algo", 1, NULL, 'a' },
@@ -160,7 +164,6 @@ static struct option const options[] = {
 	{ "no-longpoll", 0, NULL, 1003 },
 	{ "pass", 1, NULL, 'p' },
 	{ "protocol-dump", 0, NULL, 'P' },
-	{ "proxy", 1, NULL, 'x' },
 	{ "quiet", 0, NULL, 'q' },
 	{ "retries", 1, NULL, 'r' },
 	{ "retry-pause", 1, NULL, 'R' },
@@ -522,13 +525,16 @@ static void *miner_thread(void *userdata)
 			if (opt_debug)
 				applog(LOG_DEBUG, "DEBUG: got new work");
 		}
+//		applog(LOG_DEBUG,"step 1");
 		if (memcmp(work.data, g_work.data, 76)) {
 			memcpy(&work, &g_work, sizeof(struct work));
 			next_nonce = 0xffffffffU / opt_n_threads * thr_id;
 		}
+//		applog(LOG_DEBUG,"step 2");
 		pthread_mutex_unlock(&g_work_lock);
 		work_restart[thr_id].restart = 0;
 		
+//		applog(LOG_DEBUG,"step 3");
 		/* adjust max_nonce to meet target scan time */
 		max64 = g_work_time + (have_longpoll ? LP_SCANTIME : opt_scantime)
 		      - time(NULL);
@@ -540,12 +546,38 @@ static void *miner_thread(void *userdata)
 		else
 			max_nonce = next_nonce + max64;
 		
+//		applog(LOG_DEBUG,"step 4");
 		hashes_done = 0;
 		gettimeofday(&tv_start, NULL);
 
 		/* scan nonces for a proof-of-work hash */
 		switch (opt_algo) {
 		case ALGO_SCRYPT:
+#ifdef HAVE_CELL_SPU
+                        if (mythr->spe_context ) {
+				
+				//applog(LOG_DEBUG,"thr %d, next_nonce %lu, max_nonce %lu",thr_id,next_nonce,max_nonce);
+                                scanhash_spu_args *argp = (scanhash_spu_args *)
+                                        (((uintptr_t)scratchbuf + 127) & ~(uintptr_t)127);
+                                spe_stop_info_t stop_info;
+                                unsigned int entry = SPE_DEFAULT_ENTRY;
+                                memcpy(argp->data, work.data, sizeof(work.data));
+                                memcpy(argp->target, work.target, sizeof(work.target));
+                                argp->max_nonce = max_nonce;
+				argp->next_nonce = next_nonce;
+                                argp->hashes_done = 0;
+                                //work_restart[thr_id].restart = 0;
+                                spe_context_run(mythr->spe_context, &entry, 0, argp,
+                                                (void *)&work_restart[thr_id].restart, &stop_info);
+                                hashes_done = argp->hashes_done;
+				next_nonce = argp->next_nonce;
+                                memcpy(work.data, argp->data, sizeof(work.data));
+                                rc = stop_info.result.spe_exit_code;
+				//applog(LOG_DEBUG,"out : thr %d, next_nonce %lu, hashes_done %lu",thr_id,next_nonce,hashes_done);
+                                break;
+                        }
+#endif
+
 			rc = scanhash_scrypt(thr_id, work.data, scratchbuf, work.target,
 			                     max_nonce, &next_nonce, &hashes_done);
 			break;
@@ -737,30 +769,35 @@ static void parse_arg (int key, char *arg)
 		v = atoi(arg);
 		if (v < -1 || v > 9999)	/* sanity check */
 			show_usage_and_exit(1);
+
 		opt_retries = v;
 		break;
 	case 'R':
 		v = atoi(arg);
 		if (v < 1 || v > 9999)	/* sanity check */
 			show_usage_and_exit(1);
+
 		opt_fail_pause = v;
 		break;
 	case 's':
 		v = atoi(arg);
 		if (v < 1 || v > 9999)	/* sanity check */
 			show_usage_and_exit(1);
+
 		opt_scantime = v;
 		break;
 	case 'T':
 		v = atoi(arg);
 		if (v < 1 || v > 99999)	/* sanity check */
 			show_usage_and_exit(1);
+
 		opt_timeout = v;
 		break;
 	case 't':
 		v = atoi(arg);
 		if (v < 1 || v > 9999)	/* sanity check */
 			show_usage_and_exit(1);
+
 		opt_n_threads = v;
 		break;
 	case 'u':
@@ -771,6 +808,7 @@ static void parse_arg (int key, char *arg)
 		if (strncmp(arg, "http://", 7) &&
 		    strncmp(arg, "https://", 8))
 			show_usage_and_exit(1);
+
 		free(rpc_url);
 		rpc_url = strdup(arg);
 		p = strchr(rpc_url, '@');
@@ -787,24 +825,9 @@ static void parse_arg (int key, char *arg)
 	case 'O':			/* --userpass */
 		if (!strchr(arg, ':'))
 			show_usage_and_exit(1);
+
 		free(rpc_userpass);
 		rpc_userpass = strdup(arg);
-		break;
-	case 'x':			/* --proxy */
-		if (!strncmp(arg, "socks4://", 9))
-			opt_proxy_type = CURLPROXY_SOCKS4;
-		else if (!strncmp(arg, "socks5://", 9))
-			opt_proxy_type = CURLPROXY_SOCKS5;
-#if LIBCURL_VERSION_NUM >= 0x071200
-		else if (!strncmp(arg, "socks4a://", 10))
-			opt_proxy_type = CURLPROXY_SOCKS4A;
-		else if (!strncmp(arg, "socks5h://", 10))
-			opt_proxy_type = CURLPROXY_SOCKS5_HOSTNAME;
-#endif
-		else
-			opt_proxy_type = CURLPROXY_HTTP;
-		free(opt_proxy);
-		opt_proxy = strdup(arg);
 		break;
 	case 1003:
 		want_longpoll = false;
@@ -904,12 +927,17 @@ int main(int argc, char *argv[])
 		num_processors = 1;
 	if (!opt_n_threads)
 		opt_n_threads = num_processors;
+#ifdef HAVE_CELL_SPU
+        num_cell_spu = spe_cpu_info_get(SPE_COUNT_USABLE_SPES, -1);
+	if (num_cell_spu>0) opt_n_threads+=num_cell_spu;
+	
+#endif
 
-	if (!rpc_userpass && (rpc_user || rpc_pass)) {
-		if (!rpc_user)
-			rpc_user = strdup("");
-		if (!rpc_pass)
-			rpc_pass = strdup("");
+	if (!rpc_userpass) {
+		if (!rpc_user || !rpc_pass) {
+			applog(LOG_ERR, "No login credentials supplied");
+			return 1;
+		}
 		rpc_userpass = malloc(strlen(rpc_user) + strlen(rpc_pass) + 2);
 		if (!rpc_userpass)
 			return 1;
@@ -932,7 +960,6 @@ int main(int argc, char *argv[])
 	thr_hashrates = (double *) calloc(opt_n_threads, sizeof(double));
 	if (!thr_hashrates)
 		return 1;
-
 	/* init workio thread info */
 	work_thr_id = opt_n_threads;
 	thr = &thr_info[work_thr_id];
@@ -967,12 +994,18 @@ int main(int argc, char *argv[])
 	/* start mining threads */
 	for (i = 0; i < opt_n_threads; i++) {
 		thr = &thr_info[i];
-
+		thr_hashrates[i]=0;
 		thr->id = i;
 		thr->q = tq_new();
 		if (!thr->q)
 			return 1;
-
+#ifdef HAVE_CELL_SPU
+                /* The first 'num_cell_spu' threads are allocated for SPU */
+                if (i < num_cell_spu) {
+                        thr->spe_context = spe_context_create(0, NULL);
+                        spe_program_load(thr->spe_context, &scrypt_spu);
+                }
+#endif
 		if (unlikely(pthread_create(&thr->pth, NULL, miner_thread, thr))) {
 			applog(LOG_ERR, "thread %d create failed", i);
 			return 1;
